@@ -1,0 +1,153 @@
+- name: Install xhprof with xhgui
+  hosts: localhost
+  vars:
+    php_version: 7.0
+    php_directory: "/etc/php/{{ php_version }}"
+    php_fpm_path: "/var/run/php/php{{ php_version }}-fpm.sock"
+    xhprof_directory: "/opt/xhprof"
+    xhprof_repo: "https://github.com/tideways/php-profiler-extension.git"
+    xhprof_extension: "tideways_xhprof"
+    xhgui_directory: "/var/www/xhgui"
+    xhgui_repo: "https://github.com/perftools/xhgui.git"
+    www_user: "deployer"
+    www_group: "www-data"
+    xhgui_hostname: "xhgui.local"
+    xhgui_webroot: "{{ xhgui_directory }}/webroot/"
+  remote_user: vagrant
+  tasks:
+  ### Common actions
+  - name: Run apt-get update
+    apt:
+      update_cache: yes
+      cache_valid_time: 86400
+    become: yes
+  - name: Add apt repository for php
+    apt_repository:
+      repo: ppa:ondrej/php
+      state: present
+      update_cache: yes
+  - name: Install packages
+    apt:
+      name: '{{ item }}'
+      state: present
+    with_items:
+      - "php{{ php_version }}-dev"
+  ### XHPROF
+  - name: Create xhprof directory
+    file:
+      path: "{{ xhprof_directory }}"
+      state: directory
+  - name: Clone xhprof repository
+    git:
+      repo: "{{ xhprof_repo }}"
+      dest: "{{ xhprof_directory }}"
+      accept_hostkey: yes
+  - name: Build xhprof php extension
+    shell: "phpize && ./configure && make && make install"
+    become: yes
+    args:
+      chdir: "{{ xhprof_directory }}"
+  - name: Activate xhprof extension for php CLI
+    lineinfile:
+      dest: "{{ php_directory }}/cli/php.ini"
+      regexp: "{{ item.regexp }}"
+      line: "{{ item.line }}"
+    with_items:
+      - { regexp: '^.*\[xhprof\].*$', line: '[xhprof]' }
+      - { regexp: '^.*extension={{ xhprof_extension }}\.so.*$', line: 'extension={{ xhprof_extension }}.so' }
+  - name: Activate xhprof extension for php FPM
+    lineinfile:
+      dest: "{{ php_directory }}/fpm/php.ini"
+      regexp: "{{ item.regexp }}"
+      line: "{{ item.line }}"
+    with_items:
+      - { regexp: '^.*\[xhprof\].*$', line: '[xhprof]' }
+      - { regexp: '^.*extension={{ xhprof_extension }}\.so.*$', line: 'extension={{ xhprof_extension }}.so' }
+  - name: Restart php-fpm
+    service:
+      name: "php{{ php_version }}-fpm"
+      state: restarted
+  ### XHGUI
+  - name: Install packages
+    apt:
+      name: '{{ item }}'
+      state: present
+    with_items:
+      - "php{{ php_version }}-mcrypt"
+      - "php-pear"
+      - "mongodb"
+  - name: Install mongodb php extension
+    pear:
+      name: pecl/mongodb
+      state: present
+  - name: Activate mongodb extension for php CLI
+    lineinfile:
+      dest: "{{ php_directory }}/cli/php.ini"
+      regexp: "{{ item.regexp }}"
+      line: "{{ item.line }}"
+    with_items:
+      - { regexp: '^.*\[mongodb\].*$', line: '[mongodb]' }
+      - { regexp: '^.*extension=mongodb\.so.*$', line: 'extension=mongodb.so' }
+  - name: Activate mongodb extension for php FPM
+    lineinfile:
+      dest: "{{ php_directory }}/fpm/php.ini"
+      regexp: "{{ item.regexp }}"
+      line: "{{ item.line }}"
+    with_items:
+      - { regexp: '^.*\[mongodb\].*$', line: '[mongodb]' }
+      - { regexp: '^.*extension=mongodb\.so.*$', line: 'extension=mongodb.so' }
+  - name: Restart php-fpm
+    service:
+      name: "php{{ php_version }}-fpm"
+      state: restarted
+  - name: Ensure mongodb is running and enabled on boot
+    service:
+      name: "mongodb"
+      state: restarted
+      enabled: yes
+  - name: Create xhgui directory
+    file:
+      path: "{{ xhgui_directory }}"
+      state: directory
+      owner: "{{ www_user }}"
+      group: "{{ www_group }}"
+      mode: 0775
+  - name: Clone xhgui repository
+    git:
+      repo: "{{ xhgui_repo }}"
+      dest: "{{ xhgui_directory }}"
+      accept_hostkey: yes
+    become: yes
+    become_user: "{{ www_user }}"
+  - name: Set correct permissions to cache directory
+    file:
+      path: "{{ xhgui_directory }}/cache"
+      state: directory
+      mode: 0777
+      recurse: yes
+  - name: Run install script
+    shell: php install.php
+    become: yes
+    become_user: "{{ www_user }}"
+    args:
+      chdir: "{{ xhgui_directory }}"
+  - name: Run composer install to install dependencies # Only because install script may fail to do that
+    composer:
+      command: install
+      no_dev: no
+      working_dir: "{{ xhgui_directory }}"
+    become: yes
+    become_user: "{{ www_user }}"
+  - name: Copy vhost configuration for xhgui
+    template:
+      src: xhgui.conf.j2
+      dest: /etc/nginx/sites-available/xhgui.conf
+  - name: Move xhgui conf to sites-enabled
+    file:
+      src: /etc/nginx/sites-available/xhgui.conf
+      dest: /etc/nginx/sites-enabled/xhgui.conf
+      state: link
+  - name: Restart nginx
+    service:
+      name: nginx
+      state: restarted
